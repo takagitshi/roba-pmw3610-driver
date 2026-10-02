@@ -597,8 +597,15 @@ static enum pixart_input_mode get_input_mode_for_current_layer(const struct devi
     return MOVE;
 }
 
+static bool pmw3610_acceleration_bypass_layer_active(const struct pixart_config *config) {
+    return zmk_keymap_layer_active(config->acceleration_scroll_layer) ||
+           zmk_keymap_layer_active(config->acceleration_gesture_layer) ||
+           zmk_keymap_layer_active(config->acceleration_gesture_layer_2);
+}
+
 static int pmw3610_report_data(const struct device *dev) {
     struct pixart_data *data = dev->data;
+    const struct pixart_config *config = dev->config;
     uint8_t buf[PMW3610_BURST_SIZE];
 
     if (unlikely(!data->ready)) {
@@ -716,6 +723,14 @@ static int pmw3610_report_data(const struct device *dev) {
     }
 #endif
 
+    const bool acceleration_active =
+        IS_ENABLED(CONFIG_PMW3610_POINTER_ACCELERATION) && config->acceleration_enabled &&
+        input_mode == MOVE &&
+        !pmw3610_acceleration_bypass_layer_active(config);
+    if (!acceleration_active) {
+        pmw3610_pointer_accel_reset(&data->acceleration);
+    }
+
     if (x != 0 || y != 0) {
         if (input_mode == MOVE || input_mode == SNIPE) {
 #if AUTOMOUSE_LAYER > 0
@@ -727,8 +742,24 @@ static int pmw3610_report_data(const struct device *dev) {
                 activate_automouse_layer();
             }
 #endif
-            input_report_rel(dev, INPUT_REL_X, x, false, K_FOREVER);
-            input_report_rel(dev, INPUT_REL_Y, y, true, K_FOREVER);
+            int32_t output_x = x;
+            int32_t output_y = y;
+            if (acceleration_active) {
+                const int64_t now_ms = k_uptime_get();
+                const int64_t frame_gap_ms = data->acceleration.have_frame_time
+                                                 ? now_ms - data->acceleration.last_frame_time_ms
+                                                 : 0;
+                const int64_t elapsed_ms = frame_gap_ms > 0 &&
+                                                   frame_gap_ms <
+                                                       config->acceleration_curve.idle_reset_ms
+                                               ? frame_gap_ms
+                                               : config->acceleration_curve.reference_interval_ms;
+                pmw3610_pointer_accel_apply_frame(
+                    &config->acceleration_curve, &data->acceleration, x, y, now_ms,
+                    elapsed_ms, &output_x, &output_y);
+            }
+            input_report_rel(dev, INPUT_REL_X, output_x, false, K_FOREVER);
+            input_report_rel(dev, INPUT_REL_Y, output_y, true, K_FOREVER);
         } else if (input_mode == SCROLL) {
             data->scroll_delta_x += x;
             data->scroll_delta_y += y;
@@ -748,8 +779,6 @@ static int pmw3610_report_data(const struct device *dev) {
         } else if (input_mode == BALL_ACTION) {
             data->ball_action_delta_x += x;
             data->ball_action_delta_y += y;
-
-            const struct pixart_config *config = dev->config;
 
             if(ball_action_idx != -1) {
                 const struct ball_action_cfg action_cfg = *config->ball_actions[ball_action_idx];
@@ -848,6 +877,7 @@ static int pmw3610_init(const struct device *dev) {
 
     // init device pointer
     data->dev = dev;
+    pmw3610_pointer_accel_reset(&data->acceleration);
 
     // init smart algorithm flag;
     data->sw_smart_flag = false;
@@ -911,7 +941,87 @@ DT_INST_FOREACH_CHILD(0, BALL_ACTIONS_INST)
 
 #define BALL_ACTIONS_LEN (DT_INST_FOREACH_CHILD(0, BALL_ACTIONS_UTIL_ONE) 0)
 
+#define PMW3610_GESTURE_LAYER_2(n)                                                               \
+    DT_PROP_OR(DT_DRV_INST(n), pointer_acceleration_gesture_layer_2,                              \
+               DT_PROP(DT_DRV_INST(n), pointer_acceleration_gesture_layer))
+
+#define PMW3610_PRECISION_FULL_SPEED(n)                                                          \
+    DT_PROP_OR(DT_DRV_INST(n), pointer_acceleration_precision_full_speed,                         \
+               DT_PROP(DT_DRV_INST(n), pointer_acceleration_takeoff_speed))
+
 #define PMW3610_DEFINE(n)                                                                          \
+    BUILD_ASSERT(DT_PROP(DT_DRV_INST(n), pointer_acceleration_base_gain_milli) >= 500,             \
+                 "Pointer acceleration base gain must be at least 0.5x");                         \
+    BUILD_ASSERT(DT_PROP(DT_DRV_INST(n), pointer_acceleration_base_gain_milli) <= 1000,            \
+                 "Pointer acceleration base gain must not exceed 1.0x");                          \
+    BUILD_ASSERT(DT_PROP(DT_DRV_INST(n), pointer_acceleration_takeoff_speed) >= 0,                 \
+                 "Pointer acceleration takeoff speed must not be negative");                    \
+    BUILD_ASSERT(DT_PROP(DT_DRV_INST(n), pointer_acceleration_takeoff_speed) <= UINT16_MAX,        \
+                 "Pointer acceleration takeoff speed must fit in 16 bits");                      \
+    BUILD_ASSERT(DT_PROP(DT_DRV_INST(n), pointer_acceleration_full_speed) <= UINT16_MAX,           \
+                 "Pointer acceleration full speed must fit in 16 bits");                         \
+    BUILD_ASSERT(DT_PROP(DT_DRV_INST(n), pointer_acceleration_full_speed) >                        \
+                     DT_PROP(DT_DRV_INST(n), pointer_acceleration_takeoff_speed),                  \
+                 "Pointer acceleration full speed must exceed takeoff speed");                   \
+    BUILD_ASSERT(DT_PROP(DT_DRV_INST(n), pointer_acceleration_max_gain_milli) >=                   \
+                     DT_PROP(DT_DRV_INST(n), pointer_acceleration_base_gain_milli),                \
+                 "Pointer acceleration maximum gain must exceed the base gain");                 \
+    BUILD_ASSERT(DT_PROP(DT_DRV_INST(n), pointer_acceleration_max_gain_milli) <= 4000,             \
+                 "Pointer acceleration maximum gain must not exceed 4.0x");                      \
+    BUILD_ASSERT(DT_PROP(DT_DRV_INST(n), pointer_acceleration_reference_interval_ms) > 0,          \
+                 "Pointer acceleration reference interval must be positive");                    \
+    BUILD_ASSERT(DT_PROP(DT_DRV_INST(n), pointer_acceleration_reference_interval_ms) <=            \
+                     UINT16_MAX,                                                                  \
+                 "Pointer acceleration reference interval must fit in 16 bits");                 \
+    BUILD_ASSERT(DT_PROP(DT_DRV_INST(n), pointer_acceleration_idle_reset_ms) >                     \
+                     DT_PROP(DT_DRV_INST(n), pointer_acceleration_reference_interval_ms),          \
+                 "Pointer acceleration idle reset must exceed the reference interval");          \
+    BUILD_ASSERT(DT_PROP(DT_DRV_INST(n), pointer_acceleration_idle_reset_ms) <= UINT16_MAX,        \
+                 "Pointer acceleration idle reset must fit in 16 bits");                         \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_mode) ||                  \
+                     DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_gain_milli) >= 100,    \
+                 "Pointer acceleration precision gain must be at least 0.1x");                    \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_mode) ||                  \
+                     DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_gain_milli) <=         \
+                         DT_PROP(DT_DRV_INST(n), pointer_acceleration_base_gain_milli),             \
+                 "Pointer acceleration precision gain must not exceed the base gain");            \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_mode) ||                  \
+                     DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_speed) >= 0,           \
+                 "Pointer acceleration precision speed must not be negative");                  \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_mode) ||                  \
+                     DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_speed) <               \
+                         PMW3610_PRECISION_FULL_SPEED(n),                                          \
+                 "Pointer acceleration precision speed must be below full speed");               \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_mode) ||                  \
+                     DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_speed) <= UINT16_MAX,  \
+                 "Pointer acceleration precision speed must fit in 16 bits");                    \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_mode) ||                  \
+                     PMW3610_PRECISION_FULL_SPEED(n) <=                                            \
+                         DT_PROP(DT_DRV_INST(n), pointer_acceleration_takeoff_speed),               \
+                 "Pointer acceleration precision must end at or below takeoff speed");           \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_mode) ||                  \
+                     PMW3610_PRECISION_FULL_SPEED(n) <= UINT16_MAX,                                \
+                 "Pointer acceleration precision full speed must fit in 16 bits");               \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration) ||                                 \
+                     DT_PROP(DT_DRV_INST(n), pointer_acceleration_scroll_layer) >= 0,              \
+                 "Pointer acceleration Scroll layer must not be negative");                     \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration) ||                                 \
+                     DT_PROP(DT_DRV_INST(n), pointer_acceleration_scroll_layer) <                  \
+                         ZMK_KEYMAP_LAYERS_LEN,                                                     \
+                 "Pointer acceleration Scroll layer must exist");                                \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration) ||                                 \
+                     DT_PROP(DT_DRV_INST(n), pointer_acceleration_gesture_layer) >= 0,             \
+                 "Pointer acceleration Gesture layer must not be negative");                    \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration) ||                                 \
+                     DT_PROP(DT_DRV_INST(n), pointer_acceleration_gesture_layer) <                 \
+                         ZMK_KEYMAP_LAYERS_LEN,                                                     \
+                 "Pointer acceleration Gesture layer must exist");                               \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration) ||                                 \
+                     PMW3610_GESTURE_LAYER_2(n) >= 0,                                             \
+                 "Pointer acceleration Gesture layer 2 must not be negative");                  \
+    BUILD_ASSERT(!DT_PROP(DT_DRV_INST(n), pointer_acceleration) ||                                 \
+                     PMW3610_GESTURE_LAYER_2(n) < ZMK_KEYMAP_LAYERS_LEN,                           \
+                 "Pointer acceleration Gesture layer 2 must exist");                             \
     static struct pixart_data data##n;                                                             \
     static int32_t scroll_layers##n[] = DT_PROP(DT_DRV_INST(n), scroll_layers);                    \
     static int32_t snipe_layers##n[] = DT_PROP(DT_DRV_INST(n), snipe_layers);                      \
@@ -936,6 +1046,34 @@ DT_INST_FOREACH_CHILD(0, BALL_ACTIONS_INST)
         .snipe_layers_len = DT_PROP_LEN(DT_DRV_INST(n), snipe_layers),                             \
         .ball_actions = ball_actions,                                                              \
         .ball_actions_len = BALL_ACTIONS_LEN,                                                      \
+        .acceleration_enabled = DT_PROP(DT_DRV_INST(n), pointer_acceleration),                     \
+        .acceleration_scroll_layer =                                                              \
+            DT_PROP(DT_DRV_INST(n), pointer_acceleration_scroll_layer),                            \
+        .acceleration_gesture_layer =                                                             \
+            DT_PROP(DT_DRV_INST(n), pointer_acceleration_gesture_layer),                           \
+        .acceleration_gesture_layer_2 = PMW3610_GESTURE_LAYER_2(n),                               \
+        .acceleration_curve =                                                                     \
+            {                                                                                      \
+                .base_gain_milli =                                                                \
+                    DT_PROP(DT_DRV_INST(n), pointer_acceleration_base_gain_milli),                 \
+                .takeoff_speed =                                                                  \
+                    DT_PROP(DT_DRV_INST(n), pointer_acceleration_takeoff_speed),                   \
+                .full_speed =                                                                     \
+                    DT_PROP(DT_DRV_INST(n), pointer_acceleration_full_speed),                      \
+                .max_gain_milli =                                                                 \
+                    DT_PROP(DT_DRV_INST(n), pointer_acceleration_max_gain_milli),                  \
+                .reference_interval_ms =                                                          \
+                    DT_PROP(DT_DRV_INST(n), pointer_acceleration_reference_interval_ms),           \
+                .idle_reset_ms =                                                                  \
+                    DT_PROP(DT_DRV_INST(n), pointer_acceleration_idle_reset_ms),                   \
+                .precision_enabled =                                                              \
+                    DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_mode),                  \
+                .precision_gain_milli =                                                          \
+                    DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_gain_milli),            \
+                .precision_speed =                                                               \
+                    DT_PROP(DT_DRV_INST(n), pointer_acceleration_precision_speed),                 \
+                .precision_full_speed = PMW3610_PRECISION_FULL_SPEED(n),                          \
+            },                                                                                     \
     };                                                                                             \
                                                                                                    \
     DEVICE_DT_INST_DEFINE(n, pmw3610_init, NULL, &data##n, &config##n, POST_KERNEL,                \

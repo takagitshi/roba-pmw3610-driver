@@ -113,3 +113,16 @@ CONFIG_INPUT=y
 CONFIG_ZMK_MOUSE=y
 CONFIG_PMW3610=y
 ```
+
+## Optional pointer acceleration
+
+Pointer acceleration is disabled by default. Enable
+`CONFIG_PMW3610_POINTER_ACCELERATION=y` and add `pointer-acceleration;` to the
+sensor node to opt in. The devicetree binding documents the precision gain,
+transition speeds, maximum gain, report interval, idle reset, and layer bypass
+properties.
+
+Acceleration is applied only to normal pointer movement. The existing sensor
+initialization, CPI, orientation, Smart Algorithm, polling, scroll, snipe, ball
+action, and automouse paths remain owned by this driver. Scroll and gesture
+layers can be configured to receive raw deltas.

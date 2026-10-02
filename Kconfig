@@ -13,6 +13,13 @@ menuconfig PMW3610
 
 if PMW3610
 
+config PMW3610_POINTER_ACCELERATION
+  bool "PMW3610 pointer acceleration"
+  default n
+  help
+    Apply optional same-frame pointer acceleration in the PMW3610 report path.
+    The feature remains inactive unless enabled on a sensor devicetree node.
+
 config PMW3610_SMART_ALGORITHM
   bool "Enable an algorithm of PMW3610 to enhance surface coverage"
   default y
