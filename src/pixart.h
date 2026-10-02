@@ -11,6 +11,8 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/sensor.h>
 
+#include <pmw3610/pointer_acceleration.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -27,6 +29,7 @@ struct pixart_data {
     int32_t scroll_delta_y;
     int32_t ball_action_delta_x;
     int32_t ball_action_delta_y;
+    struct pmw3610_pointer_accel_state acceleration;
 
 #ifdef CONFIG_PMW3610_POLLING_RATE_125_SW
     int64_t last_poll_time;
@@ -74,6 +77,11 @@ struct pixart_config {
     int32_t *snipe_layers;
     struct ball_action_cfg **ball_actions;
     size_t ball_actions_len;
+    bool acceleration_enabled;
+    uint8_t acceleration_scroll_layer;
+    uint8_t acceleration_gesture_layer;
+    uint8_t acceleration_gesture_layer_2;
+    struct pmw3610_pointer_accel_curve acceleration_curve;
 };
 
 #ifdef __cplusplus
